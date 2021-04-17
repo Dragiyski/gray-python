@@ -1,0 +1,25 @@
+allow-shorthand: false
+
+pep8:
+  disable:
+    - E722
+    - E501
+
+pylint:
+  disable:
+    - redefined-builtin
+    - bare-except
+    - unsubscriptable-object
+    - protected-access
+    - too-many-arguments
+    - too-many-branches
+    - unused-wildcard-import
+    - no-value-for-parameter
+
+mccabe:
+  run: false
+
+pyflakes:
+  disable:
+    - F401
+    - F405
