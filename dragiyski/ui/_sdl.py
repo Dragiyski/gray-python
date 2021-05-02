@@ -89,6 +89,13 @@ def CreateWindow(title, x, y, width, height, flags):
         raise UIError
     return (sdl_window, id)
 
+def CreateContext(window):
+    EnsureSubsystem(SDL_INIT_VIDEO)
+    sdl_context = SDL_GL_CreateContext(window)
+    if sdl_context is None:
+        raise UIError
+    return sdl_context
+
 def GetWindowFromID(id):
     EnsureSubsystem(SDL_INIT_VIDEO)
     sdl_window = SDL_GetWindowFromID(id)

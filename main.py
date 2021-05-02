@@ -16,8 +16,9 @@ def print_screen_info():
             print(f'  .mode[{mode_index}]: {modes[mode_index]}')
 
 def main():
-    dragiyski.ui.Window.create('test')
-    dragiyski.ui.Window.create('test2')
+    mainWindow = dragiyski.ui.OpenGLWindow.create(title='test')
+    mainWindowRef = dragiyski.ui.Window(mainWindow.id())
+    print(mainWindowRef is mainWindow)
 
 
 if __name__ == '__main__':

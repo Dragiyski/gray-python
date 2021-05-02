@@ -2,23 +2,26 @@ from ._sdl import *
 from ._event_thread import delegate_call, add_event_listener as _add_event_listener
 from ._display import Display
 from typing import Optional, Union
-from enum import Enum
-from threading import Event, Thread
+from enum import Enum, IntEnum, IntFlag
+from threading import Event, Thread, RLock
 
 _window_map = {}
+_window_map_lock = RLock()
 _window_thread = None
 _window_event = Event()
 _window_event_name = {}
 
-for name in dir(video): # pylint: disable=undefined-variable
+for name in dir(video):  # pylint: disable=undefined-variable
     # pylint: disable=undefined-variable
     if name.startswith('SDL_WINDOWEVENT_') and isinstance(getattr(video, name), int):
         _window_event_name[getattr(video, name)] = name[len('SDL_WINDOWEVENT_'):].lower()
+
 
 def _window_thread_function():
     while len(_window_map) > 0:
         _window_event.clear()
         _window_event.wait()
+
 
 def _on_window_added():
     global _window_thread
@@ -26,9 +29,11 @@ def _on_window_added():
         _window_thread = Thread(target=_window_thread_function, daemon=False, name='UI Window Lifeline Thread')
         _window_thread.start()
 
+
 def _on_window_removed():
     _window_event.set()
-    
+
+
 def _event_dispatch_function(type, id, data1, data2):
     # pylint: disable=unused-argument
     # First, we can retrieve Window() class object by calling it with the ID, which would either get it from the
@@ -40,12 +45,13 @@ def _event_dispatch_function(type, id, data1, data2):
     except Window.NotFound:
         return
     if type == SDL_WINDOWEVENT_CLOSE:
-        SDL_DestroyWindow(window)
+        window._destroy()
         del _window_map[id]
         _on_window_removed()
 
 
 _add_event_listener('window', _event_dispatch_function)
+
 
 class WindowPosition:
     def __init__(
@@ -130,12 +136,13 @@ def _window_position_calculate(position: WindowPosition):
 
 class _Window(type):
     def __call__(self, id):
-        if id in _window_map:
-            return _window_map[id]
+        with _window_map_lock:
+            if id in _window_map:
+                return _window_map[id]
         sdl_window = delegate_call(GetWindowFromID, id)
         if sdl_window is None:
             raise Window.NotFound(f'Unable to find Window with ID {id}')
-        window = super().__new__(self)
+        window = super(_Window, self).__new__(self)
         window.__init__(id, sdl_window)
         return window
 
@@ -145,22 +152,24 @@ class Window(metaclass=_Window):
         def __init__(self, message):
             # pylint: disable=bad-super-call
             super(Exception, self).__init__(message)
-            
+
     class FullScreen(Enum):
         WINDOWED = 0
-        SIMULATED = 1
-        ACTUAL = 2
+        BORDERLESS = 1
+        REAL = 2
 
     def __init__(self, id: int, window: SDL_CreateWindow.restype):
         self.__id = id
         self._as_parameter_ = self.__window = window
-        if id not in _window_map:
-            _window_map[id] = self
-            _on_window_added()
+        with _window_map_lock:
+            if id not in _window_map:
+                _window_map[id] = self
+                _on_window_added()
 
     @classmethod
     def create(
         cls,
+        *,
         title: Union[str, bytes] = "",
         position: WindowPosition = WindowPosition(),
         visible: bool = True,
@@ -182,9 +191,9 @@ class Window(metaclass=_Window):
             args[5] |= SDL_WINDOW_MINIMIZED
         if maximized:
             args[5] |= SDL_WINDOW_MAXIMIZED
-        if fullscreen == Window.FullScreen.SIMULATED:
+        if fullscreen == Window.FullScreen.BORDERLESS:
             args[5] |= SDL_WINDOW_FULLSCREEN_DESKTOP
-        elif fullscreen == Window.FullScreen.ACTUAL:
+        elif fullscreen == Window.FullScreen.REAL:
             args[5] |= SDL_WINDOW_FULLSCREEN
         return cls._create(*args)
 
@@ -192,11 +201,73 @@ class Window(metaclass=_Window):
     def _create(cls, *args):
         # pylint: disable=unpacking-non-sequence
         window, id = delegate_call(CreateWindow, *args)
-        if id not in _window_map:
-            self = super().__new__(cls)
-            cls.__init__(self, id, window)
-            return self
-        return _window_map[id]
-    
+        with _window_map_lock:
+            if id not in _window_map:
+                self = super().__new__(cls)
+                cls.__init__(self, id, window)
+                return self
+            return _window_map[id]
+
+    def _destroy(self):
+        SDL_DestroyWindow(self)
+
     def id(self):
         return self.__id
+
+
+class OpenGLWindow(Window, metaclass=_Window):
+    class ProfileMask(IntEnum):
+        CORE = SDL_GL_CONTEXT_PROFILE_CORE
+        COMPATIBILITY = SDL_GL_CONTEXT_PROFILE_COMPATIBILITY
+        ES = SDL_GL_CONTEXT_PROFILE_ES
+
+    class ContextFlags(IntFlag):
+        DEBUG = SDL_GL_CONTEXT_DEBUG_FLAG
+        FORWARD_COMPATIBLE = SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG,
+        ROBUST_ACCESS = SDL_GL_CONTEXT_ROBUST_ACCESS_FLAG,
+        RESET_ISOLATION = SDL_GL_CONTEXT_RESET_ISOLATION_FLAG
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        red_size: int = 8,
+        green_size: int = 8,
+        blue_size: int = 8,
+        alpha_size: int = 0,
+        double_buffer: bool = True,
+        depth_size: int = 16,
+        stencil_size: int = 0,
+        accum_red_size: int = 0,
+        accum_green_size: int = 0,
+        accum_blue_size: int = 0,
+        accum_alpha_size: int = 0,
+        stereo: bool = False,
+        multisample_buffers: int = 0,
+        multisample_samples: int = 0,
+        accelerated_visual: bool = True,
+        context_version_major: int = 3,
+        context_version_minor: int = 0,
+        profile_mask: ProfileMask = ProfileMask.CORE,
+        context_flags: ContextFlags = 0,
+        share_with_current_context: bool = False,
+        srgb_capable: bool = False,
+        flush_on_release: bool = False,
+        **kwargs
+    ):
+        window = super(OpenGLWindow, cls).create(**kwargs)
+        try:
+            window.__context = delegate_call(CreateContext, window)
+        except UIError:
+            window._destroy()
+            raise
+        return window
+
+    @classmethod
+    def _create(cls, *args):
+        args = (*args[0:5], args[5] | SDL_WINDOW_OPENGL)
+        return super(OpenGLWindow, cls)._create(*args)
+
+    def _destroy(self):
+        SDL_GL_DeleteContext(self.__context)
+        super()._destroy()
