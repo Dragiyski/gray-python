@@ -1,6 +1,6 @@
 from ._sdl import *
-from ._event_thread import delegate_call, add_event_listener as _add_event_listener
 from ._display import Display
+from ._event_emitter import EventEmitter
 from typing import Optional, Union
 from enum import Enum, IntEnum, IntFlag
 from threading import Event, Thread, RLock
@@ -8,19 +8,13 @@ from threading import Event, Thread, RLock
 _window_map = {}
 _window_map_lock = RLock()
 _window_thread = None
-_window_event = Event()
-_window_event_name = {}
-
-for name in dir(video):  # pylint: disable=undefined-variable
-    # pylint: disable=undefined-variable
-    if name.startswith('SDL_WINDOWEVENT_') and isinstance(getattr(video, name), int):
-        _window_event_name[getattr(video, name)] = name[len('SDL_WINDOWEVENT_'):].lower()
+_window_thread_event = Event()
 
 
 def _window_thread_function():
     while len(_window_map) > 0:
-        _window_event.clear()
-        _window_event.wait()
+        _window_thread_event.clear()
+        _window_thread_event.wait()
 
 
 def _on_window_added():
@@ -31,26 +25,7 @@ def _on_window_added():
 
 
 def _on_window_removed():
-    _window_event.set()
-
-
-def _event_dispatch_function(type, id, data1, data2):
-    # pylint: disable=unused-argument
-    # First, we can retrieve Window() class object by calling it with the ID, which would either get it from the
-    # _window_map or it will make new instance if this is the first time we have a window with this ID.
-    # Next we must get the time of the event using _window_event_name dictionary (or convert type to string if not found)
-    # Next we must dispatch the event to the Window instance itself, where the listeners added will be called.
-    try:
-        window = Window(id)
-    except Window.NotFound:
-        return
-    if type == SDL_WINDOWEVENT_CLOSE:
-        window._destroy()
-        del _window_map[id]
-        _on_window_removed()
-
-
-_add_event_listener('window', _event_dispatch_function)
+    _window_thread_event.set()
 
 
 class WindowPosition:
@@ -139,15 +114,10 @@ class _Window(type):
         with _window_map_lock:
             if id in _window_map:
                 return _window_map[id]
-        sdl_window = delegate_call(GetWindowFromID, id)
-        if sdl_window is None:
-            raise Window.NotFound(f'Unable to find Window with ID {id}')
-        window = super(_Window, self).__new__(self)
-        window.__init__(id, sdl_window)
-        return window
+        raise Window.NotFound(f'Unable to find Window with ID {id}')
 
 
-class Window(metaclass=_Window):
+class Window(EventEmitter, metaclass=_Window):
     class NotFound(UIError):
         def __init__(self, message):
             # pylint: disable=bad-super-call
@@ -159,12 +129,9 @@ class Window(metaclass=_Window):
         REAL = 2
 
     def __init__(self, id: int, window: SDL_CreateWindow.restype):
+        super().__init__()
         self.__id = id
         self._as_parameter_ = self.__window = window
-        with _window_map_lock:
-            if id not in _window_map:
-                _window_map[id] = self
-                _on_window_added()
 
     @classmethod
     def create(
@@ -199,20 +166,28 @@ class Window(metaclass=_Window):
 
     @classmethod
     def _create(cls, *args):
-        # pylint: disable=unpacking-non-sequence
-        window, id = delegate_call(CreateWindow, *args)
-        with _window_map_lock:
-            if id not in _window_map:
-                self = super().__new__(cls)
-                cls.__init__(self, id, window)
-                return self
-            return _window_map[id]
+        from ._event_thread import delegate_call
+        return delegate_call(cls._create_window, *args)
 
     def _destroy(self):
         SDL_DestroyWindow(self)
+        self._as_parameter_ = self.__window = None
+        with _window_map_lock:
+            del _window_map[self.__id]
+            _on_window_removed()
 
     def id(self):
         return self.__id
+
+    @classmethod
+    def _create_window(cls, *args):
+        with _window_map_lock:
+            window, id = CreateWindow(*args)
+            self = super().__new__(cls)
+            cls.__init__(self, id, window)
+            _window_map[id] = self
+        _on_window_added()
+        return self
 
 
 class OpenGLWindow(Window, metaclass=_Window):
@@ -255,13 +230,10 @@ class OpenGLWindow(Window, metaclass=_Window):
         flush_on_release: bool = False,
         **kwargs
     ):
-        window = super(OpenGLWindow, cls).create(**kwargs)
-        try:
-            window.__context = delegate_call(CreateContext, window)
-        except UIError:
-            window._destroy()
-            raise
-        return window
+        from ._event_thread import delegate_call
+        values = locals()
+        attributes = {key: value for (key, value) in [(k, values[k]) for k in OpenGLWindow._setup_attributes.__code__.co_varnames]}
+        return delegate_call(cls.__create, attributes, kwargs)
 
     @classmethod
     def _create(cls, *args):
@@ -269,5 +241,109 @@ class OpenGLWindow(Window, metaclass=_Window):
         return super(OpenGLWindow, cls)._create(*args)
 
     def _destroy(self):
-        SDL_GL_DeleteContext(self.__context)
+        if self.__context is not None:
+            SDL_GL_DeleteContext(self.__context)
         super()._destroy()
+
+    @classmethod
+    def __create(cls, attributes, kwargs):
+        cls._setup_attributes(**attributes)
+        window = super(OpenGLWindow, cls).create(**kwargs)
+        try:
+            window.__context = CreateContext(window)
+        except:
+            window._destroy()
+            raise
+        return window
+
+    @staticmethod
+    def _setup_attributes(
+        *,
+        red_size: int = 8,
+        green_size: int = 8,
+        blue_size: int = 8,
+        alpha_size: int = 0,
+        double_buffer: bool = True,
+        depth_size: int = 16,
+        stencil_size: int = 0,
+        accum_red_size: int = 0,
+        accum_green_size: int = 0,
+        accum_blue_size: int = 0,
+        accum_alpha_size: int = 0,
+        stereo: bool = False,
+        multisample_buffers: int = 0,
+        multisample_samples: int = 0,
+        accelerated_visual: bool = True,
+        context_version_major: int = 3,
+        context_version_minor: int = 0,
+        profile_mask: ProfileMask = ProfileMask.CORE,
+        context_flags: ContextFlags = 0,
+        share_with_current_context: bool = False,
+        srgb_capable: bool = False,
+        flush_on_release: bool = False
+    ):
+        EnsureSubsystem(SDL_INIT_VIDEO)
+        if SDL_GL_SetAttribute(SDL_GL_RED_SIZE, red_size) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, green_size) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, blue_size) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, alpha_size) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, int(double_buffer)) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, depth_size) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, stencil_size) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_ACCUM_RED_SIZE, accum_red_size) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_ACCUM_GREEN_SIZE, accum_green_size) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_ACCUM_BLUE_SIZE, accum_blue_size) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_ACCUM_ALPHA_SIZE, accum_alpha_size) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_STEREO, int(stereo)) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_MULTISAMPLEBUFFERS, multisample_buffers) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_MULTISAMPLESAMPLES, multisample_samples) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_ACCELERATED_VISUAL, int(accelerated_visual)) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, context_version_major) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, context_version_minor) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, int(profile_mask)) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, int(context_flags)) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_SHARE_WITH_CURRENT_CONTEXT, int(share_with_current_context)) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_FRAMEBUFFER_SRGB_CAPABLE, int(srgb_capable)) < 0:
+            raise UIError
+        if SDL_GL_SetAttribute(SDL_GL_CONTEXT_RELEASE_BEHAVIOR, SDL_GL_CONTEXT_RELEASE_BEHAVIOR_FLUSH if flush_on_release else SDL_GL_CONTEXT_RELEASE_BEHAVIOR_NONE) < 0:
+            raise UIError
+
+    def makeCurrent(self):
+        if SDL_GL_MakeCurrent(self, self.__context) < 0:
+            raise UIError
+
+    def releaseCurrent(self):
+        if SDL_GL_MakeCurrent(None, None) < 0:
+            raise UIError
+
+    class SwapInterval(IntEnum):
+        NONE = 0
+        VSYNC = 1
+        ADAPTIVE = -1
+
+    @staticmethod
+    def setSwapInterval(interval: SwapInterval):
+        SetSwapInterval(int(interval))
+
+    def swap(self):
+        SDL_GL_SwapWindow(self)

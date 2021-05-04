@@ -106,3 +106,8 @@ def GetWindowFromID(id):
     except:
         return None
     return sdl_window
+
+def SetSwapInterval(interval):
+    EnsureSubsystem(SDL_INIT_VIDEO)
+    if SDL_GL_SetSwapInterval(interval) < 0:
+        raise UIError

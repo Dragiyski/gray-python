@@ -1,5 +1,6 @@
 import sys
 import dragiyski.ui
+from OpenGL.GL import *
 
 
 def print_screen_info():
@@ -15,11 +16,28 @@ def print_screen_info():
         for mode_index in range(len(modes)):
             print(f'  .mode[{mode_index}]: {modes[mode_index]}')
 
-def main():
-    mainWindow = dragiyski.ui.OpenGLWindow.create(title='test')
-    mainWindowRef = dragiyski.ui.Window(mainWindow.id())
-    print(mainWindowRef is mainWindow)
 
+def main():
+    window = dragiyski.ui.OpenGLWindow.create(
+        title='Test Window',
+        context_version_major=4,
+        context_version_minor=6,
+        profile_mask=dragiyski.ui.OpenGLWindow.ProfileMask.CORE
+    )
+    window.add_event_listener('exposed', on_window_exposed)
+
+def on_window_exposed(window):
+    window.makeCurrent()
+    glClearColor(0.0, 0.0, 0.0, 1.0)
+    paint_window(window)
+    window.releaseCurrent()
+
+def paint_window(window):
+    window.makeCurrent()
+    glClear(GL_COLOR_BUFFER_BIT)
+
+    window.swap()
+    window.releaseCurrent()
 
 if __name__ == '__main__':
     sys.exit(main())

@@ -7,6 +7,7 @@ from ._error import UIError
 from typing import Optional, Callable
 from traceback import print_exc
 
+_window_event_names = {id: name for (name, id) in [(x[len('SDL_WINDOWEVENT_'):].lower(), getattr(video, x)) for x in dir(video) if x.startswith('SDL_WINDOWEVENT_')]}
 
 def _event_thread_function():
     global _event_thread_ready, _event_thread_function, _event_thread_exception, _sdl_command_event
@@ -86,8 +87,20 @@ def _dispatch_task(task):
 
 
 def _comsume_event(event):
+    from ._window import Window
     if event.type == SDL_WINDOWEVENT:
-        dispatch_event('window', event.window.event, event.window.windowID, event.window.data1, event.window.data2)
+        try:
+            window = Window(event.window.windowID)
+        except Window.NotFound:
+            return
+        window_event = _window_event_names[event.window.event]
+        print(f'{window_event}: {event.window.data1, event.window.data2}')
+        if event.window.event in [SDL_WINDOWEVENT_MOVED, SDL_WINDOWEVENT_RESIZED, SDL_WINDOWEVENT_SIZE_CHANGED]:
+            window.emit_event(window_event, event.window.data1, event.window.data2)
+        else:
+            window.emit_event(window_event)
+        if event.window.event == SDL_WINDOWEVENT_CLOSE:
+            window._destroy()
 
 
 def _ensure_event_thread():
@@ -106,7 +119,7 @@ def _ensure_event_thread():
         raise _event_thread_exception[1]
 
 
-def delegate_call(function, *args, **kwargs):
+def delegate_call(function, /, *args, **kwargs):
     _ensure_event_thread()
     # Some functions (like event filters) will execute in the event thread, in which case if they access any interface that call
     # delegate_call() we should not add anything to any queue and block (event thread should not wait for itself)
@@ -144,25 +157,3 @@ def on_process_exit():
         if SDL_PushEvent(event) < 0:
             return
         _event_thread.join()
-
-
-_listeners = {}
-
-def add_event_listener(type: str, function: Callable):
-    if type not in _listeners:
-        _listeners[type] = set()
-    _listeners[type].add(function)
-    
-def remove_event_listener(type: str, function: Optional[Callable]):
-    global _listeners
-    if type in _listeners:
-        if function is not None:
-            _listeners[type].remove(function)
-        else:
-            _listeners[type].clear()
-            del _listeners[type]
-
-def dispatch_event(type: str, *args):
-    if type in _listeners:
-        for function in _listeners[type]:
-            function(*args)
