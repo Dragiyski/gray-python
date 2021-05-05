@@ -87,20 +87,22 @@ def _dispatch_task(task):
 
 
 def _comsume_event(event):
-    from ._window import Window
-    if event.type == SDL_WINDOWEVENT:
-        try:
-            window = Window(event.window.windowID)
-        except Window.NotFound:
-            return
-        window_event = _window_event_names[event.window.event]
-        print(f'{window_event}: {event.window.data1, event.window.data2}')
-        if event.window.event in [SDL_WINDOWEVENT_MOVED, SDL_WINDOWEVENT_RESIZED, SDL_WINDOWEVENT_SIZE_CHANGED]:
-            window.emit_event(window_event, event.window.data1, event.window.data2)
-        else:
-            window.emit_event(window_event)
-        if event.window.event == SDL_WINDOWEVENT_CLOSE:
-            window._destroy()
+    try:
+        from ._window import Window
+        if event.type == SDL_WINDOWEVENT:
+            try:
+                window = Window(event.window.windowID)
+            except Window.NotFound:
+                return
+            window_event = _window_event_names[event.window.event]
+            if event.window.event in [SDL_WINDOWEVENT_MOVED, SDL_WINDOWEVENT_RESIZED, SDL_WINDOWEVENT_SIZE_CHANGED]:
+                window.emit_event(window_event, event.window.data1, event.window.data2)
+            else:
+                window.emit_event(window_event)
+            if event.window.event == SDL_WINDOWEVENT_CLOSE:
+                window._destroy()
+    except:
+        print_exc()
 
 
 def _ensure_event_thread():

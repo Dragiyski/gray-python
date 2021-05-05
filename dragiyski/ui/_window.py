@@ -328,13 +328,19 @@ class OpenGLWindow(Window, metaclass=_Window):
         if SDL_GL_SetAttribute(SDL_GL_CONTEXT_RELEASE_BEHAVIOR, SDL_GL_CONTEXT_RELEASE_BEHAVIOR_FLUSH if flush_on_release else SDL_GL_CONTEXT_RELEASE_BEHAVIOR_NONE) < 0:
             raise UIError
 
-    def makeCurrent(self):
+    def bindContext(self):
         if SDL_GL_MakeCurrent(self, self.__context) < 0:
             raise UIError
 
-    def releaseCurrent(self):
+    def releaseContext(self):
         if SDL_GL_MakeCurrent(None, None) < 0:
             raise UIError
+
+    def getDrawableSize(self):
+        width = SDL_GL_GetDrawableSize.argtypes[1]._type_(0)
+        height = SDL_GL_GetDrawableSize.argtypes[2]._type_(0)
+        SDL_GL_GetDrawableSize(self, width, height)
+        return (width.value, height.value)
 
     class SwapInterval(IntEnum):
         NONE = 0
