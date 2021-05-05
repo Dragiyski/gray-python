@@ -51,31 +51,38 @@ class _Display(type):
         cache = _ensure_display_cache()
         yield from cache
 
-
 class Display(metaclass=_Display):
     def __init__(self, index):
         self.__index = index
 
     def name(self):
-        return delegate_call(GetDisplayName, self.__index)
+        return GetDisplayName(self.__index)
     
     def current_mode(self):
-        return delegate_call(GetCurrentDisplayMode, self.__index)
+        return GetCurrentDisplayMode(self.__index)
     
     def native_mode(self):
-        return delegate_call(GetDesktopDisplayMode, self.__index)
+        return GetDesktopDisplayMode(self.__index)
     
     def bounds(self):
-        return delegate_call(GetDisplayBounds, self.__index)
+        return GetDisplayBounds(self.__index)
     
     def usable_bounds(self):
-        return delegate_call(GetDisplayUsableBounds, self.__index)
+        return GetDisplayUsableBounds(self.__index)
     
     def dpi(self):
-        return delegate_call(GetDisplayDPI, self.__index)
+        return GetDisplayDPI(self.__index)
     
     def modes(self):
-        return delegate_call(GetDisplayModes, self.__index)
+        return GetDisplayModes(self.__index)
     
     def index(self):
         return self.__index
+
+    @staticmethod
+    def getDisplayAt(x:int, y:int):
+        for display in Display:
+            bounds = display.bounds()
+            if x >= bounds.x and x < bounds.x + bounds.w and y >= bounds.y and y < bounds.y + bounds.h:
+                return display
+        return None

@@ -2,9 +2,13 @@ from sdl2 import *
 from ._error import UIError
 
 def EnsureSubsystem(flag):
+    from ._event_thread import delegate_call
     if not SDL_WasInit(flag):
-        if SDL_InitSubSystem(flag) < 0:
-            raise UIError
+        delegate_call(InitSubsystem, flag)
+        
+def InitSubsystem(flag):
+    if SDL_InitSubSystem(flag) < 0:
+        raise UIError
 
 def GetNumberVideoDisplays():
     EnsureSubsystem(SDL_INIT_VIDEO)

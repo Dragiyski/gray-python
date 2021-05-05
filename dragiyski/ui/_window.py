@@ -35,7 +35,7 @@ class WindowPosition:
             y: Optional[int] = None,
             width: Optional[int] = None,
             height: Optional[int] = None,
-            display: Optional[int] = None,
+            display: Optional[Union[int, Display]] = None,
             x_center: bool = True,
             y_center: bool = True
     ):
@@ -43,7 +43,10 @@ class WindowPosition:
         self.y = y
         self.width = width
         self.height = height
-        self.display = display
+        if isinstance(display, Display):
+            self.display = display.index()
+        else:
+            self.display = display
         self.x_center = x_center
         self.y_center = y_center
 
@@ -254,6 +257,7 @@ class OpenGLWindow(Window, metaclass=_Window):
         except:
             window._destroy()
             raise
+        window.releaseContext()
         return window
 
     @staticmethod
