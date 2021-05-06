@@ -2,10 +2,9 @@ from window import GLWindow
 from OpenGL.GL import *
 import dragiyski.ui
 import OpenGL.GL
-import sdl2
 import ctypes
 import math
-import pathlib
+import numpy
 import os
 
 _gl_debug_source = {int(getattr(OpenGL.GL, key)): key[len('GL_DEBUG_SOURCE_'):].lower() for key in dir(OpenGL.GL) if key.startswith('GL_DEBUG_SOURCE_') and not key.endswith('_KHR')}
@@ -98,9 +97,17 @@ class RaytraceWindow(GLWindow):
         glCreateTextures(GL_TEXTURE_2D_ARRAY, 1, ctypes.pointer(self._raytrace_texture))
         self._screen_texture = glCreateTextures.argtypes[2]._type_(0)
         glCreateTextures(GL_TEXTURE_RECTANGLE, 1, ctypes.pointer(self._screen_texture))
-        self._field_of_view = 30.0
         operation_clear_shader = gl_create_shader_from_file(GL_COMPUTE_SHADER, os.path.join(os.path.dirname(RaytraceWindow.gl_initialize.__code__.co_filename), 'shader/operation/clear.glsl'))
         self._operation_clear_program = gl_create_program(operation_clear_shader)
+        self._field_of_view = 30.0
+        self._camera_position = numpy.array([7.35889, -6.92579, 4.95831])
+        self._camera_direction = (0.0 - self._camera_position) / numpy.linalg.norm(self._camera_position)
+        self._camera_roll = 0.0
+        # XY is the horizon plane, Z > 0 = toward the sky
+        unroll_left = numpy.cross(self._camera_direction, numpy.array([0.0, 0.0, 1.0]))
+        unroll_up = numpy.cross(unroll_left, self._camera_direction)
+        self._camera_left = math.cos(self._camera_roll) * unroll_left + math.sin(self._camera_roll) * unroll_up
+        self._camera_up = math.cos(self._camera_roll) * unroll_up - math.sin(self._camera_roll) * unroll_left
         self._r_color = TimeOscillation(5.43)
         self._g_color = TimeOscillation(4.78)
         self._b_color = TimeOscillation(5.17)
@@ -128,6 +135,30 @@ class RaytraceWindow(GLWindow):
         glBindTexture(GL_TEXTURE_RECTANGLE, self._screen_texture)
         glTexImage2D(GL_TEXTURE_RECTANGLE, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, None)
         glBindTexture(GL_TEXTURE_RECTANGLE, 0)
+        field_of_view = numpy.deg2rad(self._field_of_view) / 2.0
+        # The distance of screen rectangle to the camera is meaningless in this computation
+        # The rays are only affected from its size at the same distance, so for simplicity
+        # we make the screen at distance 1.0
+        # half_diagonal / (distance = 1.0) = math.tan(field_of_view)
+        half_diagonal = math.tan(field_of_view)
+        # Now within the screen plane, we have the screen rectangle whose half-size toward right and top form triangle with diagonal as hypotenuse.
+        # This result in a system of equations: t = half_diagonal
+        # x^2 + y^2 = t^2
+        # x / y = ar: aspect_ratio
+        # Solved by replacing:
+        # x = ar * y
+        # (ar * y) ^2 + y^2 = t^2
+        # (ar + 1) * y^2 = t^2
+        # y^2 = t^2 / (ar + 1)
+        # y = t / sqrt(ar + 1) 
+        aspect_ratio = width / height
+        view_height = half_diagonal / math.sqrt(aspect_ratio + 1)
+        view_width = aspect_ratio * view_height
+        self._view_size = numpy.array([view_width * 2.0, view_height * 2.0])
+        # Now 1 screen size of x-axis is equal to one view_size length vector in direction of camera_left
+        # similarly 1 screen size of y-axis is equal to one view_size length vector in direction of camera_top
+        # We can divide that by the number of pixels
+        k = 0
 
     def gl_paint(self):
         glClearColor(self._r_color.get(), self._g_color.get(), self._b_color.get(), 1.0)
