@@ -71,6 +71,19 @@ def gl_debug_message_callback(
     print(f'[{id}][{gl_get_debug_name("source", _gl_debug_source, source)}][{gl_get_debug_name("type", _gl_debug_type, type)}][{gl_get_debug_name("severity", _gl_debug_severity, severity)}]: {message.decode("utf-8")}')
 
 
+class TimeOscillation:
+    def __init__(self, duration: float, min: float = 0.0, max: float = 1.0):
+        self._duration = duration
+        self._min = min
+        self._max = max
+
+    def get(self):
+        from time import monotonic
+        x = monotonic()
+        x = math.sin(((x % self._duration) / self._duration) * math.pi) * 0.5 + 0.5
+        return self._min + x * (self._max - self._min)
+
+
 class RaytraceWindow(GLWindow):
     def gl_initialize(self):
         glEnable(GL_DEBUG_OUTPUT)
@@ -88,7 +101,11 @@ class RaytraceWindow(GLWindow):
         self._field_of_view = 30.0
         operation_clear_shader = gl_create_shader_from_file(GL_COMPUTE_SHADER, os.path.join(os.path.dirname(RaytraceWindow.gl_initialize.__code__.co_filename), 'shader/operation/clear.glsl'))
         self._operation_clear_program = gl_create_program(operation_clear_shader)
+        self._r_color = TimeOscillation(5.43)
+        self._g_color = TimeOscillation(4.78)
+        self._b_color = TimeOscillation(5.17)
         glClearColor(0.0, 0.0, 0.0, 1.0)
+        self.set_active()
 
     def gl_resize(self):
         width, height = self.getDrawableSize()
@@ -113,7 +130,8 @@ class RaytraceWindow(GLWindow):
         glBindTexture(GL_TEXTURE_RECTANGLE, 0)
 
     def gl_paint(self):
-        super().gl_paint()
+        glClearColor(self._r_color.get(), self._g_color.get(), self._b_color.get(), 1.0)
+        glClear(GL_COLOR_BUFFER_BIT)
         field_of_view = self._field_of_view / 180.0 * math.pi
         min_size = min(self._width, self._height)
         view_size = [self._width / min_size, self._height / min_size]

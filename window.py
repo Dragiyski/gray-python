@@ -12,6 +12,15 @@ class GLWindow(OpenGLWindow):
         super().__init__(*args, **kwargs)
         self.add_event_listener('exposed', self.__once_exposed)
 
+    def set_active(self):
+        if isinstance(self._gl_passive_repaint, Event):
+            self._gl_passive_repaint.set()
+            self._gl_passive_repaint = None
+
+    def set_passive(self):
+        if not isinstance(self._gl_passive_repaint, Event):
+            self._gl_passive_repaint = Event()
+
     def __once_exposed(self, /, *args):
         self.remove_event_listener('exposed', self.__once_exposed)
         self.add_event_listener('size_changed', self.__on_size_changed)
