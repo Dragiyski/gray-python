@@ -42,10 +42,13 @@ def gl_create_program(*shaders):
     for shader in shaders:
         glAttachShader(program, shader)
     glLinkProgram(program)
+    glValidateProgram(program)
     program_status = glGetProgramiv(program, GL_LINK_STATUS)
     if not program_status:
         log = glGetProgramInfoLog(program)
         glDeleteProgram(program)
+        for shader in shaders:
+            glDeleteShader(shader)
         raise ProgramLinkError(log)
     return program
 
@@ -97,14 +100,26 @@ class RaytraceWindow(GLWindow):
         glCreateTextures(GL_TEXTURE_2D_ARRAY, 1, ctypes.pointer(self._raytrace_texture))
         self._screen_texture = glCreateTextures.argtypes[2]._type_(0)
         glCreateTextures(GL_TEXTURE_RECTANGLE, 1, ctypes.pointer(self._screen_texture))
-        operation_clear_shader = gl_create_shader_from_file(GL_COMPUTE_SHADER, os.path.join(os.path.dirname(RaytraceWindow.gl_initialize.__code__.co_filename), 'shader/operation/clear.glsl'))
-        self._operation_clear_program = gl_create_program(operation_clear_shader)
-        self._field_of_view = 30.0
+        self._operation_clear_program = gl_create_program(
+            gl_create_shader_from_file(
+                GL_COMPUTE_SHADER,
+                os.path.join(
+                    os.path.dirname(__file__),
+                    'shader/operation/clear.glsl'
+                )
+            )
+        )
+        self._operation_clear_program_location = {
+            'image_raytrace': glGetUniformLocation(self._operation_clear_program, 'image_raytrace'),
+            'image_screen': glGetUniformLocation(self._operation_clear_program, 'image_screen')
+        }
+        self._field_of_view = 60.0
         self._camera_position = numpy.array([7.35889, -6.92579, 4.95831])
         self._camera_direction = (0.0 - self._camera_position) / numpy.linalg.norm(self._camera_position)
         self._camera_roll = 0.0
         # XY is the horizon plane, Z > 0 = toward the sky
         unroll_left = numpy.cross(self._camera_direction, numpy.array([0.0, 0.0, 1.0]))
+        unroll_left /= numpy.linalg.norm(unroll_left)
         unroll_up = numpy.cross(unroll_left, self._camera_direction)
         self._camera_left = math.cos(self._camera_roll) * unroll_left + math.sin(self._camera_roll) * unroll_up
         self._camera_up = math.cos(self._camera_roll) * unroll_up - math.sin(self._camera_roll) * unroll_left
@@ -112,7 +127,7 @@ class RaytraceWindow(GLWindow):
         self._g_color = TimeOscillation(4.78)
         self._b_color = TimeOscillation(5.17)
         glClearColor(0.0, 0.0, 0.0, 1.0)
-        self.set_active()
+        # self.set_active()
 
     def gl_resize(self):
         width, height = self.getDrawableSize()
@@ -147,27 +162,24 @@ class RaytraceWindow(GLWindow):
         # x / y = ar: aspect_ratio
         # Solved by replacing:
         # x = ar * y
-        # (ar * y) ^2 + y^2 = t^2
-        # (ar + 1) * y^2 = t^2
-        # y^2 = t^2 / (ar + 1)
-        # y = t / sqrt(ar + 1) 
+        # (ar * y)^2 + y^2 = t^2
+        # (ar^2 + 1) * y^2 = t^2
+        # y^2 = t^2 / (ar^2 + 1)
+        # y = t / sqrt(ar^2 + 1)
         aspect_ratio = width / height
-        view_height = half_diagonal / math.sqrt(aspect_ratio + 1)
+        view_height = half_diagonal / math.sqrt(aspect_ratio * aspect_ratio + 1)
         view_width = aspect_ratio * view_height
         self._view_size = numpy.array([view_width * 2.0, view_height * 2.0])
         # Now 1 screen size of x-axis is equal to one view_size length vector in direction of camera_left
         # similarly 1 screen size of y-axis is equal to one view_size length vector in direction of camera_top
-        # We can divide that by the number of pixels
+        # We can divide that by the number of pixels, finding a direction vector for each pixel
         k = 0
 
     def gl_paint(self):
-        glClearColor(self._r_color.get(), self._g_color.get(), self._b_color.get(), 1.0)
-        glClear(GL_COLOR_BUFFER_BIT)
-        field_of_view = self._field_of_view / 180.0 * math.pi
-        min_size = min(self._width, self._height)
-        view_size = [self._width / min_size, self._height / min_size]
-        view_length = math.sqrt(sum([x * x for x in view_size]))
-        screen_radius = view_length / math.tan(field_of_view * 0.5)
+        glUseProgram(self._operation_clear_program)
+        glBindImageTexture(self._operation_clear_program_location['image_raytrace'], self._raytrace_texture, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F)
+        glBindImageTexture(self._operation_clear_program_location['image_screen'], self._screen_texture, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F)
+        glDispatchCompute(self._width, self._height, 1)
 
     def gl_release(self):
         glDeleteTextures(1, ctypes.pointer(self._ray_texture))
