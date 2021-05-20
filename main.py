@@ -11,6 +11,59 @@ _gl_debug_source = {int(getattr(OpenGL.GL, key)): key[len('GL_DEBUG_SOURCE_'):].
 _gl_debug_type = {int(getattr(OpenGL.GL, key)): key[len('GL_DEBUG_TYPE_'):].lower() for key in dir(OpenGL.GL) if key.startswith('GL_DEBUG_TYPE_') and not key.endswith('_KHR')}
 _gl_debug_severity = {int(getattr(OpenGL.GL, key)): key[len('GL_DEBUG_SEVERITY_'):].lower() for key in dir(OpenGL.GL) if key.startswith('GL_DEBUG_SEVERITY_') and not key.endswith('_KHR')}
 
+cube = {
+    'vertices': numpy.array([
+        [1.000000, 1.000000, -1.000000],
+        [1.000000, -1.000000, -1.000000],
+        [1.000000, 1.000000, 1.000000],
+        [1.000000, -1.000000, 1.000000],
+        [-1.000000, 1.000000, -1.000000],
+        [-1.000000, -1.000000, -1.000000],
+        [-1.000000, 1.000000, 1.000000],
+        [-1.000000, -1.000000, 1.000000],
+    ], dtype=numpy.float32),
+    'texture_coordinates': numpy.array([
+        [1.000000, 1.000000],
+        [0.000000, 1.000000],
+        [0.000000, 0.000000],
+        [1.000000, 0.000000],
+        [1.000000, 0.000000],
+        [1.000000, 1.000000],
+        [0.000000, 1.000000],
+        [0.000000, 0.000000],
+        [1.000000, 1.000000],
+        [1.000000, 0.000000],
+        [0.000000, 1.000000],
+        [1.000000, 1.000000],
+        [1.000000, 0.000000],
+        [0.000000, 1.000000],
+        [0.000000, 0.000000],
+        [0.000000, 0.000000],
+    ], dtype=numpy.float32),
+    'normals': numpy.array([
+        [0.0000, 1.0000, 0.0000],
+        [0.0000, 0.0000, 1.0000],
+        [-1.0000, 0.0000, 0.0000],
+        [0.0000, -1.0000, 0.0000],
+        [1.0000, 0.0000, 0.0000],
+        [0.0000, 0.0000, -1.0000],
+    ], dtype=numpy.float32),
+    'faces': numpy.array([
+        [[0, 0, 0], [4, 1, 0], [6, 2, 0], [2, 3, 0]],
+        [[3, 4, 1], [2, 5, 1], [6, 6, 1], [7, 7, 1]],
+        [[7, 7, 2], [6, 6, 2], [4, 8, 2], [5, 9, 2]],
+        [[5, 10, 3], [1, 11, 3], [3, 4, 3], [7, 7, 3]],
+        [[1, 12, 4], [0, 0, 4], [2, 13, 4], [3, 14, 4]],
+        [[5, 15, 5], [4, 1, 5], [0, 0, 5], [1, 12, 5]]
+    ], dtype=numpy.uint8),
+    'triangles': []
+}
+
+index_order = ['vertices', 'texture_coordinates', 'normals']
+for face in cube['faces']:
+    index0 = face[0]
+    for vertex_index in range(1, len(face)-1):
+        pass
 
 class ShaderCompileError(Exception):
     def __init__(self, file, log):
@@ -51,6 +104,14 @@ def gl_create_program(*shaders):
             glDeleteShader(shader)
         raise ProgramLinkError(log)
     return program
+
+def gl_get_program_uniforms(program):
+    uniforms = {}
+    count = glGetProgramiv(program, GL_ACTIVE_UNIFORMS)
+    for index in range(0, count):
+        name = glGetActiveUniform(program, index)[0]
+        uniforms[name.decode('utf-8')] = glGetUniformLocation(program, name)
+    return uniforms
 
 
 def gl_get_debug_name(category: str, dictionary, value):
@@ -94,13 +155,27 @@ class RaytraceWindow(GLWindow):
             # self -> PyObject(self) -> PyObject* -> void*
             ctypes.cast(ctypes.pointer(ctypes.py_object(self)), glDebugMessageCallback.argtypes[1])
         )
+        self._field_of_view = 60.0
+        self._camera_position = numpy.array([7.35889, -6.92579, 4.95831])
+        self._camera_direction = (0.0 - self._camera_position)
+        self._camera_direction /= numpy.linalg.norm(self._camera_direction)
+        self._camera_roll = 0.0
+        self._screen_center = self._camera_position + self._camera_direction
+        # XY is the horizon plane, Z > 0 = toward the sky
+        unroll_left = numpy.cross(self._camera_direction, numpy.array([0.0, 0.0, 1.0]))
+        unroll_left /= numpy.linalg.norm(unroll_left)
+        unroll_up = numpy.cross(unroll_left, self._camera_direction)
+        self._camera_right = math.cos(self._camera_roll) * unroll_left + math.sin(self._camera_roll) * unroll_up
+        self._camera_up = math.cos(self._camera_roll) * unroll_up - math.sin(self._camera_roll) * unroll_left
         self._ray_texture = glCreateTextures.argtypes[2]._type_(0)
         glCreateTextures(GL_TEXTURE_2D_ARRAY, 1, ctypes.pointer(self._ray_texture))
         self._raytrace_texture = glCreateTextures.argtypes[2]._type_(0)
         glCreateTextures(GL_TEXTURE_2D_ARRAY, 1, ctypes.pointer(self._raytrace_texture))
         self._screen_texture = glCreateTextures.argtypes[2]._type_(0)
         glCreateTextures(GL_TEXTURE_RECTANGLE, 1, ctypes.pointer(self._screen_texture))
-        self._operation_clear_program = gl_create_program(
+        self._blit_framebuffer = glGenFramebuffers(1)
+        self._programs = {}
+        self._programs['clear'] = gl_create_program(
             gl_create_shader_from_file(
                 GL_COMPUTE_SHADER,
                 os.path.join(
@@ -109,25 +184,23 @@ class RaytraceWindow(GLWindow):
                 )
             )
         )
-        self._operation_clear_program_location = {
-            'image_raytrace': glGetUniformLocation(self._operation_clear_program, 'image_raytrace'),
-            'image_screen': glGetUniformLocation(self._operation_clear_program, 'image_screen')
-        }
-        self._field_of_view = 60.0
-        self._camera_position = numpy.array([7.35889, -6.92579, 4.95831])
-        self._camera_direction = (0.0 - self._camera_position) / numpy.linalg.norm(self._camera_position)
-        self._camera_roll = 0.0
-        # XY is the horizon plane, Z > 0 = toward the sky
-        unroll_left = numpy.cross(self._camera_direction, numpy.array([0.0, 0.0, 1.0]))
-        unroll_left /= numpy.linalg.norm(unroll_left)
-        unroll_up = numpy.cross(unroll_left, self._camera_direction)
-        self._camera_left = math.cos(self._camera_roll) * unroll_left + math.sin(self._camera_roll) * unroll_up
-        self._camera_up = math.cos(self._camera_roll) * unroll_up - math.sin(self._camera_roll) * unroll_left
-        self._r_color = TimeOscillation(5.43)
-        self._g_color = TimeOscillation(4.78)
-        self._b_color = TimeOscillation(5.17)
-        glClearColor(0.0, 0.0, 0.0, 1.0)
-        # self.set_active()
+        self._programs['camera-ray'] = gl_create_program(
+            gl_create_shader_from_file(
+                GL_COMPUTE_SHADER,
+                os.path.join(
+                    os.path.dirname(__file__),
+                    'shader/operation/camera-ray.glsl'
+                )
+            )
+        )
+        self._uniforms = {}
+        for program in self._programs.values():
+            self._uniforms[program] = gl_get_program_uniforms(program)
+            
+        # This is just a hint that the compiler might release its internal resources
+        # If it does so, resources will be reallocated on the next call to glCompileShader()
+        # The hint is useful to reduce the memory footprint once we do not plan to compile any more shaders.
+        glReleaseShaderCompiler()
 
     def gl_resize(self):
         width, height = self.getDrawableSize()
@@ -169,25 +242,43 @@ class RaytraceWindow(GLWindow):
         aspect_ratio = width / height
         view_height = half_diagonal / math.sqrt(aspect_ratio * aspect_ratio + 1)
         view_width = aspect_ratio * view_height
-        self._view_size = numpy.array([view_width * 2.0, view_height * 2.0])
-        # Now 1 screen size of x-axis is equal to one view_size length vector in direction of camera_left
+        self._view_size = numpy.array([view_width, view_height])
+        # Now 1 screen size of x-axis is equal to one view_size length vector in direction of camera_right
         # similarly 1 screen size of y-axis is equal to one view_size length vector in direction of camera_top
         # We can divide that by the number of pixels, finding a direction vector for each pixel
         k = 0
 
     def gl_paint(self):
-        glUseProgram(self._operation_clear_program)
-        glBindImageTexture(self._operation_clear_program_location['image_raytrace'], self._raytrace_texture, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F)
-        glBindImageTexture(self._operation_clear_program_location['image_screen'], self._screen_texture, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F)
+        program = self._programs['clear']
+        glUseProgram(program)
+        glBindImageTexture(0, self._raytrace_texture, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F)
+        glBindImageTexture(1, self._screen_texture, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F)
         glDispatchCompute(self._width, self._height, 1)
+        
+        program = self._programs['camera-ray']
+        uniforms = self._uniforms[program]
+        glUseProgram(program)
+        glUniform2i(uniforms['screen_size'], self._width, self._height)
+        glUniform2f(uniforms['view_size'], *self._view_size)
+        glUniform3f(uniforms['screen_center'], *self._screen_center)
+        glUniform3f(uniforms['camera_position'], *self._camera_position)
+        glUniform3f(uniforms['camera_up'], *self._camera_up)
+        glUniform3f(uniforms['camera_right'], *self._camera_right)
+        glBindImageTexture(0, self._ray_texture, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F)
+        glDispatchCompute(self._width, self._height, 1)
+        
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, self._blit_framebuffer)
+        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, self._screen_texture, 0)
+        glBlitFramebuffer(0, 0, self._width, self._height, 0, 0, self._width, self._height, GL_COLOR_BUFFER_BIT, GL_NEAREST)
 
     def gl_release(self):
         glDeleteTextures(1, ctypes.pointer(self._ray_texture))
         glDeleteTextures(1, ctypes.pointer(self._raytrace_texture))
         glDeleteTextures(1, ctypes.pointer(self._screen_texture))
-        for shader in glGetAttachedShaders(self._operation_clear_program):
-            glDeleteShader(shader)
-        glDeleteProgram(self._operation_clear_program)
+        for program in self._programs.values():
+            for shader in glGetAttachedShaders(program):
+                glDeleteShader(shader)
+            glDeleteProgram(program)
         super().gl_release()
 
 
