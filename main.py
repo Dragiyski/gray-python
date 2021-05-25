@@ -193,6 +193,15 @@ class RaytraceWindow(GLWindow):
                 )
             )
         )
+        self._programs['triangle'] = gl_create_program(
+            gl_create_shader_from_file(
+                GL_COMPUTE_SHADER,
+                os.path.join(
+                    os.path.dirname(__file__),
+                    'shader/raytrace/triangle.glsl'
+                )
+            )
+        )
         self._uniforms = {}
         for program in self._programs.values():
             self._uniforms[program] = gl_get_program_uniforms(program)
@@ -201,6 +210,18 @@ class RaytraceWindow(GLWindow):
         # If it does so, resources will be reallocated on the next call to glCompileShader()
         # The hint is useful to reduce the memory footprint once we do not plan to compile any more shaders.
         glReleaseShaderCompiler()
+        
+        cube_vertices = numpy.array([-1,1,-1,0,1,0,0,1,1,1,1,0,1,0,1,0,1,1,-1,0,1,0,1,1,1,1,1,0,0,1,1,1,-1,-1,1,0,0,1,0,0,1,-1,1,0,0,1,1,0,-1,1,1,-1,0,0,0,1,-1,-1,-1,-1,0,0,1,0,-1,-1,1,-1,0,0,0,0,1,-1,-1,0,-1,0,1,1,-1,-1,1,0,-1,0,0,0,-1,-1,-1,0,-1,0,0,1,1,1,-1,1,0,0,1,1,1,-1,1,1,0,0,0,0,1,-1,-1,1,0,0,1,0,-1,1,-1,0,0,-1,0,1,1,-1,-1,0,0,-1,1,0,-1,-1,-1,0,0,-1,0,0,-1,1,1,0,1,0,0,0,-1,1,1,0,0,1,0,1,-1,1,-1,-1,0,0,1,1,1,-1,1,0,-1,0,1,0,1,1,1,1,0,0,0,1,1,1,-1,0,0,-1,1,1], dtype=numpy.float64)
+        cube_indices = numpy.array([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,0,18,1,3,19,4,6,20,7,9,21,10,12,22,13,15,23,16], dtype=numpy.uint8)
+        self._cube_vertices_buffer = glGenBuffers(1)
+        self._cube_index_buffer = glGenBuffers(1)
+        self._triangle_count = cube_indices // 3
+        
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, self._cube_vertices_buffer)
+        glBufferData(GL_SHADER_STORAGE_BUFFER, cube_vertices)
+        
+        glBindBuffer(GL_SHADER_STORAGE_BUFFER, self._cube_index_buffer)
+        glBufferData(GL_SHADER_STORAGE_BUFFER, cube_indices)
 
     def gl_resize(self):
         width, height = self.getDrawableSize()
@@ -267,8 +288,38 @@ class RaytraceWindow(GLWindow):
         glBindImageTexture(0, self._ray_texture, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F)
         glDispatchCompute(self._width, self._height, 1)
         
+        program = self._programs['triangle']
+        uniforms = self._uniforms[program]
+        
+        glUseProgram(program)
+        # SSBO with third coordinate selection is unfeasible here, there are several options:
+        # 1. Everything scheduled by the CPU - this might be slow (but not necessarily slower than the other options);
+        # 2. Use groupMemoryBarrier() - this will keep non-intersections parallel, where intersections will reach group barrier and go one-by-one.
+        # However, this might require GL_ARB_compute_variable_group_size to specify the group size alongside the number of groups in
+        # glDispatchComputeGroupSizeARB() instead glDispatchCompute(). Also the number of triangles might exceed the local size;
+        # 3. Send the buffers to the shader and let the shader loops. This will increase the complexity of the shader, which might make it
+        # slower than (1).
+        # TODO: Measure (1) or (3) (2 is too complex to implement) and how feasible is to organize bounding boxes and spheres.
+        
+        for index in range(0, len(cube_indices), 3):
+            triangle = [[cube_vertices[k*8:k*8+3], cube_vertices[k*8+3:k*8+6], cube_vertices[k*8+6:k*8+8]] for k in cube_indices[index:index+3]]
+            planeXYZ = numpy.cross(triangle[1][0] - triangle[0][0], triangle[2][0] - triangle[0][0])
+            planeXYZ /= numpy.linalg.norm(planeXYZ)
+            planeW = numpy.dot(planeXYZ, triangle[0][0])
+            glBindImageTexture(0, self._ray_texture, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F)
+            glBindImageTexture(1, self._raytrace_texture, 0, GL_TRUE, 0, GL_READ_WRITE, GL_RGBA32F)
+            glUniform3f(uniforms['triangle[0].location'], *triangle[0][0])
+            glUniform3f(uniforms['triangle[0].normal'], *triangle[0][1])
+            glUniform3f(uniforms['triangle[1].location'], *triangle[1][0])
+            glUniform3f(uniforms['triangle[1].normal'], *triangle[1][1])
+            glUniform3f(uniforms['triangle[2].location'], *triangle[2][0])
+            glUniform3f(uniforms['triangle[2].normal'], *triangle[2][1])
+            glUniform4f(uniforms['plane'], *planeXYZ, planeW)
+            glDispatchCompute(self._width, self._height, 1)
+            
         glBindFramebuffer(GL_READ_FRAMEBUFFER, self._blit_framebuffer)
-        glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, self._screen_texture, 0)
+        glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, self._raytrace_texture, 0, 1)
+        # glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, self._screen_texture, 0)
         glBlitFramebuffer(0, 0, self._width, self._height, 0, 0, self._width, self._height, GL_COLOR_BUFFER_BIT, GL_NEAREST)
 
     def gl_release(self):
