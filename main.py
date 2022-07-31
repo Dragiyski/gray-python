@@ -1,354 +1,243 @@
-from window import GLWindow
-from OpenGL.GL import *
-import dragiyski.ui
-import OpenGL.GL
+import threading
 import ctypes
 import math
-import numpy
-import os
+from sys import exit, stderr
+from traceback import print_exc
+from sdl2 import *
+from ui.error import UIError
+from ui.display import get_display_under_cursor, get_display_bounds
+from OpenGL.GL import *
+from scene.sky import SkyScene
+from graphics.scene import Scene
 
-_gl_debug_source = {int(getattr(OpenGL.GL, key)): key[len('GL_DEBUG_SOURCE_'):].lower() for key in dir(OpenGL.GL) if key.startswith('GL_DEBUG_SOURCE_') and not key.endswith('_KHR')}
-_gl_debug_type = {int(getattr(OpenGL.GL, key)): key[len('GL_DEBUG_TYPE_'):].lower() for key in dir(OpenGL.GL) if key.startswith('GL_DEBUG_TYPE_') and not key.endswith('_KHR')}
-_gl_debug_severity = {int(getattr(OpenGL.GL, key)): key[len('GL_DEBUG_SEVERITY_'):].lower() for key in dir(OpenGL.GL) if key.startswith('GL_DEBUG_SEVERITY_') and not key.endswith('_KHR')}
-
-cube = {
-    'vertices': numpy.array([
-        [1.000000, 1.000000, -1.000000],
-        [1.000000, -1.000000, -1.000000],
-        [1.000000, 1.000000, 1.000000],
-        [1.000000, -1.000000, 1.000000],
-        [-1.000000, 1.000000, -1.000000],
-        [-1.000000, -1.000000, -1.000000],
-        [-1.000000, 1.000000, 1.000000],
-        [-1.000000, -1.000000, 1.000000],
-    ], dtype=numpy.float32),
-    'texture_coordinates': numpy.array([
-        [1.000000, 1.000000],
-        [0.000000, 1.000000],
-        [0.000000, 0.000000],
-        [1.000000, 0.000000],
-        [1.000000, 0.000000],
-        [1.000000, 1.000000],
-        [0.000000, 1.000000],
-        [0.000000, 0.000000],
-        [1.000000, 1.000000],
-        [1.000000, 0.000000],
-        [0.000000, 1.000000],
-        [1.000000, 1.000000],
-        [1.000000, 0.000000],
-        [0.000000, 1.000000],
-        [0.000000, 0.000000],
-        [0.000000, 0.000000],
-    ], dtype=numpy.float32),
-    'normals': numpy.array([
-        [0.0000, 1.0000, 0.0000],
-        [0.0000, 0.0000, 1.0000],
-        [-1.0000, 0.0000, 0.0000],
-        [0.0000, -1.0000, 0.0000],
-        [1.0000, 0.0000, 0.0000],
-        [0.0000, 0.0000, -1.0000],
-    ], dtype=numpy.float32),
-    'faces': numpy.array([
-        [[0, 0, 0], [4, 1, 0], [6, 2, 0], [2, 3, 0]],
-        [[3, 4, 1], [2, 5, 1], [6, 6, 1], [7, 7, 1]],
-        [[7, 7, 2], [6, 6, 2], [4, 8, 2], [5, 9, 2]],
-        [[5, 10, 3], [1, 11, 3], [3, 4, 3], [7, 7, 3]],
-        [[1, 12, 4], [0, 0, 4], [2, 13, 4], [3, 14, 4]],
-        [[5, 15, 5], [4, 1, 5], [0, 0, 5], [1, 12, 5]]
-    ], dtype=numpy.uint8),
-    'triangles': []
-}
-
-index_order = ['vertices', 'texture_coordinates', 'normals']
-for face in cube['faces']:
-    index0 = face[0]
-    for vertex_index in range(1, len(face)-1):
-        pass
-
-class ShaderCompileError(Exception):
-    def __init__(self, file, log):
-        if isinstance(log, bytes):
-            log = log.decode('utf-8')
-        super().__init__(f'Failed to compile OpenGL shader: {file}\n{log}')
+window = None
+window_id = 0
+gl_context = None
+gl_thread = None
+gl_loop_alive = True
+gl_loop_running = threading.Event()
+gl_need_resize = False
+gl_framebuffer = None
+_gl_scene_set = set()
+_gl_scene_active = None
+_gl_scene_next = None
+_gl_scene_lock = threading.RLock()
+_gl_scene_active_event = threading.Event()
 
 
-class ProgramLinkError(Exception):
-    def __init__(self, log):
-        super().__init__(f'Failed to link OpenGL program:\n{log}')
-
-
-def gl_create_shader_from_file(type: int, filename: str):
-    shader = glCreateShader(type)
-    with open(filename, 'rb') as file:
-        glShaderSource(shader, file.read())
-    glCompileShader(shader)
-    shader_status = glGetShaderiv(shader, GL_COMPILE_STATUS)
-    if not shader_status:
-        log = glGetShaderInfoLog(shader)
-        glDeleteShader(shader)
-        raise ShaderCompileError(filename, log)
-    return shader
-
-
-def gl_create_program(*shaders):
-    program = glCreateProgram()
-    for shader in shaders:
-        glAttachShader(program, shader)
-    glLinkProgram(program)
-    glValidateProgram(program)
-    program_status = glGetProgramiv(program, GL_LINK_STATUS)
-    if not program_status:
-        log = glGetProgramInfoLog(program)
-        glDeleteProgram(program)
-        for shader in shaders:
-            glDeleteShader(shader)
-        raise ProgramLinkError(log)
-    return program
-
-def gl_get_program_uniforms(program):
-    uniforms = {}
-    count = glGetProgramiv(program, GL_ACTIVE_UNIFORMS)
-    for index in range(0, count):
-        name = glGetActiveUniform(program, index)[0]
-        uniforms[name.decode('utf-8')] = glGetUniformLocation(program, name)
-    return uniforms
-
-
-def gl_get_debug_name(category: str, dictionary, value):
-    if value not in dictionary:
-        return f'{category}={value}'
-    return dictionary[value]
-
-
-def gl_debug_message_callback(
-    source,
-    type,
-    id,
-    severity,
-    length,
-    message,
-    param
-):
-    # int -> PyObject* -> contents of PyObject* = py_object(<the_object>) -> py_object.value returns the actual python value
-    window = ctypes.cast(param, ctypes.POINTER(ctypes.py_object)).contents.value
-    print(f'[{id}][{gl_get_debug_name("source", _gl_debug_source, source)}][{gl_get_debug_name("type", _gl_debug_type, type)}][{gl_get_debug_name("severity", _gl_debug_severity, severity)}]: {message.decode("utf-8")}')
-
-
-class TimeOscillation:
-    def __init__(self, duration: float, min: float = 0.0, max: float = 1.0):
-        self._duration = duration
-        self._min = min
-        self._max = max
-
-    def get(self):
-        from time import monotonic
-        x = monotonic()
-        x = math.sin(((x % self._duration) / self._duration) * math.pi) * 0.5 + 0.5
-        return self._min + x * (self._max - self._min)
-
-
-class RaytraceWindow(GLWindow):
-    def gl_initialize(self):
-        glEnable(GL_DEBUG_OUTPUT)
-        glDebugMessageCallback(
-            glDebugMessageCallback.argtypes[0](gl_debug_message_callback),
-            # self -> PyObject(self) -> PyObject* -> void*
-            ctypes.cast(ctypes.pointer(ctypes.py_object(self)), glDebugMessageCallback.argtypes[1])
-        )
-        self._field_of_view = 60.0
-        self._camera_position = numpy.array([7.35889, -6.92579, 4.95831])
-        self._camera_direction = (0.0 - self._camera_position)
-        self._camera_direction /= numpy.linalg.norm(self._camera_direction)
-        self._camera_roll = 0.0
-        self._screen_center = self._camera_position + self._camera_direction
-        # XY is the horizon plane, Z > 0 = toward the sky
-        unroll_left = numpy.cross(self._camera_direction, numpy.array([0.0, 0.0, 1.0]))
-        unroll_left /= numpy.linalg.norm(unroll_left)
-        unroll_up = numpy.cross(unroll_left, self._camera_direction)
-        self._camera_right = math.cos(self._camera_roll) * unroll_left + math.sin(self._camera_roll) * unroll_up
-        self._camera_up = math.cos(self._camera_roll) * unroll_up - math.sin(self._camera_roll) * unroll_left
-        self._ray_texture = glCreateTextures.argtypes[2]._type_(0)
-        glCreateTextures(GL_TEXTURE_2D_ARRAY, 1, ctypes.pointer(self._ray_texture))
-        self._raytrace_texture = glCreateTextures.argtypes[2]._type_(0)
-        glCreateTextures(GL_TEXTURE_2D_ARRAY, 1, ctypes.pointer(self._raytrace_texture))
-        self._screen_texture = glCreateTextures.argtypes[2]._type_(0)
-        glCreateTextures(GL_TEXTURE_RECTANGLE, 1, ctypes.pointer(self._screen_texture))
-        self._blit_framebuffer = glGenFramebuffers(1)
-        self._programs = {}
-        self._programs['clear'] = gl_create_program(
-            gl_create_shader_from_file(
-                GL_COMPUTE_SHADER,
-                os.path.join(
-                    os.path.dirname(__file__),
-                    'shader/operation/clear.glsl'
-                )
-            )
-        )
-        self._programs['camera-ray'] = gl_create_program(
-            gl_create_shader_from_file(
-                GL_COMPUTE_SHADER,
-                os.path.join(
-                    os.path.dirname(__file__),
-                    'shader/operation/camera-ray.glsl'
-                )
-            )
-        )
-        self._programs['triangle'] = gl_create_program(
-            gl_create_shader_from_file(
-                GL_COMPUTE_SHADER,
-                os.path.join(
-                    os.path.dirname(__file__),
-                    'shader/raytrace/triangle.glsl'
-                )
-            )
-        )
-        self._uniforms = {}
-        for program in self._programs.values():
-            self._uniforms[program] = gl_get_program_uniforms(program)
+def gl_main():
+    global _gl_scene_next, _gl_scene_active, gl_framebuffer
+    from graphics.main import on_initialize, on_paint, on_release, on_resize
+    try:
+        if SDL_GL_MakeCurrent(window, gl_context) < 0:
+            raise UIError
+        if SDL_GL_SetSwapInterval(-1) < 0:
+            print('Request for variable refresh rate failed, fallback to VSync', file=stderr)
+            if SDL_GL_SetSwapInterval(1) < 0:
+                raise UIError
             
-        # This is just a hint that the compiler might release its internal resources
-        # If it does so, resources will be reallocated on the next call to glCompileShader()
-        # The hint is useful to reduce the memory footprint once we do not plan to compile any more shaders.
-        glReleaseShaderCompiler()
+        gl_framebuffer = glGenFramebuffers(1)
         
-        cube_vertices = numpy.array([-1,1,-1,0,1,0,0,1,1,1,1,0,1,0,1,0,1,1,-1,0,1,0,1,1,1,1,1,0,0,1,1,1,-1,-1,1,0,0,1,0,0,1,-1,1,0,0,1,1,0,-1,1,1,-1,0,0,0,1,-1,-1,-1,-1,0,0,1,0,-1,-1,1,-1,0,0,0,0,1,-1,-1,0,-1,0,1,1,-1,-1,1,0,-1,0,0,0,-1,-1,-1,0,-1,0,0,1,1,1,-1,1,0,0,1,1,1,-1,1,1,0,0,0,0,1,-1,-1,1,0,0,1,0,-1,1,-1,0,0,-1,0,1,1,-1,-1,0,0,-1,1,0,-1,-1,-1,0,0,-1,0,0,-1,1,1,0,1,0,0,0,-1,1,1,0,0,1,0,1,-1,1,-1,-1,0,0,1,1,1,-1,1,0,-1,0,1,0,1,1,1,1,0,0,0,1,1,1,-1,0,0,-1,1,1], dtype=numpy.float64)
-        cube_indices = numpy.array([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,0,18,1,3,19,4,6,20,7,9,21,10,12,22,13,15,23,16], dtype=numpy.uint8)
-        self._cube_vertices_buffer = glGenBuffers(1)
-        self._cube_index_buffer = glGenBuffers(1)
-        self._triangle_count = cube_indices // 3
-        
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, self._cube_vertices_buffer)
-        glBufferData(GL_SHADER_STORAGE_BUFFER, cube_vertices)
-        
-        glBindBuffer(GL_SHADER_STORAGE_BUFFER, self._cube_index_buffer)
-        glBufferData(GL_SHADER_STORAGE_BUFFER, cube_indices)
+        glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
+        glHint(GL_POLYGON_SMOOTH_HINT, GL_NICEST)
+        glHint(GL_TEXTURE_COMPRESSION_HINT, GL_NICEST)
+        glHint(GL_FRAGMENT_SHADER_DERIVATIVE_HINT, GL_NICEST)
 
-    def gl_resize(self):
-        width, height = self.getDrawableSize()
-        self._width = width
-        self._height = height
-        glViewport(0, 0, width, height)
-        glBindTexture(GL_TEXTURE_2D_ARRAY, self._ray_texture)
-        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA32F, width, height, 2, 0, GL_RGBA, GL_FLOAT, None)
-        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 0)
-        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 0)
-        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
-        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-        glBindTexture(GL_TEXTURE_2D_ARRAY, self._raytrace_texture)
-        glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA32F, width, height, 4, 0, GL_RGBA, GL_FLOAT, None)
-        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BASE_LEVEL, 0)
-        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAX_LEVEL, 0)
-        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
-        glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
-        glBindTexture(GL_TEXTURE_2D_ARRAY, 0)
-        glBindTexture(GL_TEXTURE_RECTANGLE, self._screen_texture)
-        glTexImage2D(GL_TEXTURE_RECTANGLE, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, None)
-        glBindTexture(GL_TEXTURE_RECTANGLE, 0)
-        field_of_view = numpy.deg2rad(self._field_of_view) / 2.0
-        # The distance of screen rectangle to the camera is meaningless in this computation
-        # The rays are only affected from its size at the same distance, so for simplicity
-        # we make the screen at distance 1.0
-        # half_diagonal / (distance = 1.0) = math.tan(field_of_view)
-        half_diagonal = math.tan(field_of_view)
-        # Now within the screen plane, we have the screen rectangle whose half-size toward right and top form triangle with diagonal as hypotenuse.
-        # This result in a system of equations: t = half_diagonal
-        # x^2 + y^2 = t^2
-        # x / y = ar: aspect_ratio
-        # Solved by replacing:
-        # x = ar * y
-        # (ar * y)^2 + y^2 = t^2
-        # (ar^2 + 1) * y^2 = t^2
-        # y^2 = t^2 / (ar^2 + 1)
-        # y = t / sqrt(ar^2 + 1)
-        aspect_ratio = width / height
-        view_height = half_diagonal / math.sqrt(aspect_ratio * aspect_ratio + 1)
-        view_width = aspect_ratio * view_height
-        self._view_size = numpy.array([view_width, view_height])
-        # Now 1 screen size of x-axis is equal to one view_size length vector in direction of camera_right
-        # similarly 1 screen size of y-axis is equal to one view_size length vector in direction of camera_top
-        # We can divide that by the number of pixels, finding a direction vector for each pixel
-        k = 0
+        while gl_loop_alive:
+            _gl_scene_active_event.wait()
+            gl_loop_running.wait()
 
-    def gl_paint(self):
-        program = self._programs['clear']
-        glUseProgram(program)
-        glBindImageTexture(0, self._raytrace_texture, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F)
-        glBindImageTexture(1, self._screen_texture, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F)
-        glDispatchCompute(self._width, self._height, 1)
-        
-        program = self._programs['camera-ray']
-        uniforms = self._uniforms[program]
-        glUseProgram(program)
-        glUniform2i(uniforms['screen_size'], self._width, self._height)
-        glUniform2f(uniforms['view_size'], *self._view_size)
-        glUniform3f(uniforms['screen_center'], *self._screen_center)
-        glUniform3f(uniforms['camera_position'], *self._camera_position)
-        glUniform3f(uniforms['camera_up'], *self._camera_up)
-        glUniform3f(uniforms['camera_right'], *self._camera_right)
-        glBindImageTexture(0, self._ray_texture, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA32F)
-        glDispatchCompute(self._width, self._height, 1)
-        
-        program = self._programs['triangle']
-        uniforms = self._uniforms[program]
-        
-        glUseProgram(program)
-        # SSBO with third coordinate selection is unfeasible here, there are several options:
-        # 1. Everything scheduled by the CPU - this might be slow (but not necessarily slower than the other options);
-        # 2. Use groupMemoryBarrier() - this will keep non-intersections parallel, where intersections will reach group barrier and go one-by-one.
-        # However, this might require GL_ARB_compute_variable_group_size to specify the group size alongside the number of groups in
-        # glDispatchComputeGroupSizeARB() instead glDispatchCompute(). Also the number of triangles might exceed the local size;
-        # 3. Send the buffers to the shader and let the shader loops. This will increase the complexity of the shader, which might make it
-        # slower than (1).
-        # TODO: Measure (1) or (3) (2 is too complex to implement) and how feasible is to organize bounding boxes and spheres.
-        
-        for index in range(0, len(cube_indices), 3):
-            triangle = [[cube_vertices[k*8:k*8+3], cube_vertices[k*8+3:k*8+6], cube_vertices[k*8+6:k*8+8]] for k in cube_indices[index:index+3]]
-            planeXYZ = numpy.cross(triangle[1][0] - triangle[0][0], triangle[2][0] - triangle[0][0])
-            planeXYZ /= numpy.linalg.norm(planeXYZ)
-            planeW = numpy.dot(planeXYZ, triangle[0][0])
-            glBindImageTexture(0, self._ray_texture, 0, GL_TRUE, 0, GL_READ_ONLY, GL_RGBA32F)
-            glBindImageTexture(1, self._raytrace_texture, 0, GL_TRUE, 0, GL_READ_WRITE, GL_RGBA32F)
-            glUniform3f(uniforms['triangle[0].location'], *triangle[0][0])
-            glUniform3f(uniforms['triangle[0].normal'], *triangle[0][1])
-            glUniform3f(uniforms['triangle[1].location'], *triangle[1][0])
-            glUniform3f(uniforms['triangle[1].normal'], *triangle[1][1])
-            glUniform3f(uniforms['triangle[2].location'], *triangle[2][0])
-            glUniform3f(uniforms['triangle[2].normal'], *triangle[2][1])
-            glUniform4f(uniforms['plane'], *planeXYZ, planeW)
-            glDispatchCompute(self._width, self._height, 1)
+            call_on_play = False
+
+            with _gl_scene_lock:
+                if _gl_scene_next != _gl_scene_active:
+                    # A request to switch scenes is made;
+                    if _gl_scene_active is not None:
+                        # Notify the current scene it is stopping;
+                        _gl_scene_active.on_stop()
+                    _gl_scene_active = _gl_scene_next
+                    # Notify the new scene that it is playing;
+                    # Calling on_play() must be called after on_initialize() if the scene is new.
+                    call_on_play = True
+                    gl_need_resize = True
+
+            if _gl_scene_active is not None:
+                if _gl_scene_active not in _gl_scene_set:
+                    _gl_scene_active.on_initialize()
+                    _gl_scene_set.add(_gl_scene_active)
+                    gl_need_resize = True
+
+                if call_on_play:
+                    _gl_scene_active.on_play()
+
+                if gl_need_resize:
+                    width = ctypes.c_int()
+                    height = ctypes.c_int()
+                    SDL_GL_GetDrawableSize(window, width, height)
+                    _gl_scene_active.on_resize(width.value, height.value)
+                
+                _gl_scene_active.on_paint()
+                
+                SDL_GL_SwapWindow(window)
+            else:
+                # If no active scene, clear the event, so the thread is blocked.
+                _gl_scene_active_event.clear()
+
+        if _gl_scene_active is not None:
+            _gl_scene_active.on_stop()
+
+        _gl_scene_next = None
+
+        for scene in _gl_scene_set:
+            scene.on_release()
             
-        glBindFramebuffer(GL_READ_FRAMEBUFFER, self._blit_framebuffer)
-        glFramebufferTextureLayer(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, self._raytrace_texture, 0, 1)
-        # glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_RECTANGLE, self._screen_texture, 0)
-        glBlitFramebuffer(0, 0, self._width, self._height, 0, 0, self._width, self._height, GL_COLOR_BUFFER_BIT, GL_NEAREST)
+        glDeleteFramebuffers(1, [gl_framebuffer])
 
-    def gl_release(self):
-        glDeleteTextures(1, ctypes.pointer(self._ray_texture))
-        glDeleteTextures(1, ctypes.pointer(self._raytrace_texture))
-        glDeleteTextures(1, ctypes.pointer(self._screen_texture))
-        for program in self._programs.values():
-            for shader in glGetAttachedShaders(program):
-                glDeleteShader(shader)
-            glDeleteProgram(program)
-        super().gl_release()
+    except:
+        event = SDL_Event()
+        event.type = SDL_QUIT
+        SDL_PushEvent(event)
+        print_exc()
 
+
+def main():
+    global window, window_id, gl_context, gl_thread, gl_loop_alive, gl_loop_running, gl_need_resize
+
+    # Default settings*
+    # Width and Height will be maximum 1024x768, but no more than 90% of the screen.
+    width = 1024
+    height = 768
+    title = 'Gray'
+
+    # Step 1: Init the SDL library;
+    if SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) < 0:
+        raise UIError
+
+    # Step 2: Prepare OpenGL attributes, particularly important to get OpenGL 4.6+
+    SDL_GL_SetAttribute(SDL_GL_RED_SIZE, 8)
+    SDL_GL_SetAttribute(SDL_GL_GREEN_SIZE, 8)
+    SDL_GL_SetAttribute(SDL_GL_BLUE_SIZE, 8)
+    SDL_GL_SetAttribute(SDL_GL_ALPHA_SIZE, 8)
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1)
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4)
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 6)
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE)
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG)
+
+    # Locate proper position for the window
+    display_index = get_display_under_cursor()
+    display_size = SDL_Rect()
+    if SDL_GetDisplayUsableBounds(display_index, display_size) < 0:
+        raise UIError
+
+    window_position = [0] * 4
+    if display_size.w * 0.9 < width:
+        window_position[2] = int(display_size.w * 0.9)
+    else:
+        window_position[2] = width
+    if window_position[3] * 0.9 < height:
+        window_position[3] = int(display_size.h * 0.9)
+    else:
+        window_position[3] = height
+
+    window_position[0] = display_size.x + (display_size.w - window_position[2]) // 2
+    window_position[1] = display_size.y + (display_size.h - window_position[3]) // 2
+
+    window = SDL_CreateWindow(str.encode(title, 'utf-8'), *window_position, SDL_WINDOW_SHOWN | SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_INPUT_FOCUS | SDL_WINDOW_MOUSE_FOCUS)
+    if window is None:
+        raise UIError
+
+    SDL_SetWindowMinimumSize(window, 160, 90)
+
+    gl_context = SDL_GL_CreateContext(window)
+    if gl_context is None:
+        raise UIError
+    SDL_GL_MakeCurrent(None, None)
+
+    window_id = SDL_GetWindowID(window)
+    gl_thread = threading.Thread(target=gl_main, name='DrawThread', daemon=True)
+    gl_loop_running.set()
+    gl_thread.start()
+    set_scene(SkyScene())
+
+    mouse_capture = False
+    while True:
+        event = SDL_Event()
+        if SDL_WaitEvent(event) == 0:
+            raise UIError
+        if event.type == SDL_QUIT:
+            break
+        if event.type == SDL_WINDOWEVENT:
+            if event.window.windowID == window_id:
+                if event.window.event == SDL_WINDOWEVENT_CLOSE:
+                    break
+                elif event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED:
+                    gl_need_resize = True
+                elif event.window.event == SDL_WINDOWEVENT_FOCUS_LOST:
+                    gl_loop_running.clear()
+                    if SDL_SetRelativeMouseMode(0) < 0:
+                        raise UIError
+                    mouse_capture = False
+                elif event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED:
+                    gl_loop_running.set()
+                elif event.window.event == SDL_WINDOWEVENT_EXPOSED:
+                    gl_loop_running.set()
+        elif event.type == SDL_MOUSEBUTTONDOWN:
+            if event.button.windowID == window_id and event.button.button == SDL_BUTTON_LEFT:
+                SDL_RaiseWindow(window)
+                if SDL_SetRelativeMouseMode(1) < 0:
+                    raise UIError
+                mouse_capture = True
+        elif event.type == SDL_MOUSEBUTTONUP:
+            if event.button.windowID == window_id and event.button.button == SDL_BUTTON_LEFT:
+                if SDL_SetRelativeMouseMode(0) < 0:
+                    raise UIError
+                mouse_capture = False
+        elif event.type == SDL_MOUSEMOTION:
+            if event.motion.windowID == window_id and mouse_capture:
+                x = ctypes.c_int()
+                y = ctypes.c_int()
+                w = ctypes.c_int()
+                h = ctypes.c_int()
+                SDL_GetWindowPosition(window, x, y)
+                SDL_GetWindowSize(window, w, h)
+                db = get_display_bounds()
+                display = 0
+                for index in range(len(db)):
+                    bounds = db[index]
+                    if x.value >= bounds.x and x.value < bounds.x + bounds.w and y.value <= bounds.y and y.value < bounds.y + bounds.h:
+                        display = index
+                        break
+                bounds = db[display]
+                rotation_size = min(bounds.w, bounds.h)
+                delta_x = (event.motion.xrel / rotation_size) * math.pi * 2
+                delta_y = (event.motion.yrel / rotation_size) * math.pi * 2
+                if _gl_scene_active is not None and _gl_scene_active.camera is not None:
+                    _gl_scene_active.camera.rotate(delta_x, delta_y)
+                
+
+    _join_draw_thread()
+    SDL_Quit()
+    return 0
+
+def _join_draw_thread():
+    global window, gl_loop_alive
+    gl_loop_alive = False
+    if gl_thread.is_alive():
+        gl_loop_running.set()
+        _gl_scene_active_event.set()
+        gl_thread.join()
+    if window is not None:
+        SDL_DestroyWindow(window)
+        window = None
+        window_id = 0
+        
+def set_scene(scene: Scene):
+    global _gl_scene_next
+    with _gl_scene_lock:
+        if scene != _gl_scene_active:
+            _gl_scene_next = scene
+            _gl_scene_active_event.set()
 
 if __name__ == '__main__':
-    import sys
-
-    def main():
-        # Get the current mouse position (in global coordinate system)
-        state = dragiyski.ui.getGlobalMouseState()
-        # Get display for those coordinates
-        display = dragiyski.ui.Display.getDisplayAt(state.x, state.y)
-        # Create a window at the position of the mouse coordinates. If no mouse is available and/or display is None,
-        # it will create a window at the default display
-        RaytraceWindow.create(
-            title='Raytrace',
-            context_version_major=4,
-            context_version_minor=6,
-            profile_mask=GLWindow.ProfileMask.CORE,
-            position=dragiyski.ui.WindowPosition(display=display)
-        )
-
-    sys.exit(main())
+    exit(main())
